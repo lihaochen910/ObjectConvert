@@ -4,6 +4,8 @@
 
 using System;
 using System.IO;
+using System.Collections;
+using System.Collections.Generic;
 using System.Reflection;
 #if UNITY_ENGINE
 using UnityEngine;
@@ -47,6 +49,9 @@ namespace ObjectConvert
             Converter.ValueAction(toObjectConvert.Action, new Converter.ObjectDummyAccessor(obj), null);
         }
 
+
+        private delegate bool ValueActionDelegate(Converter.Accessor accessor, object[] attributes);
+
         private static void ValueAction(Converter.ValueActionDelegate action, Converter.Accessor accessor, object[] attributes)
         {
             // 普通字段
@@ -57,7 +62,20 @@ namespace ObjectConvert
             Type type = accessor.type;
             if (type.IsArray)
             {
+                if (accessor.obj == null)
+                    return;
                 Converter.ArrayEnumeration(action, accessor, attributes);
+            }
+            else if (type.IsGenericType) // 泛型类序列化支持
+            {
+                if (type.GetGenericTypeDefinition() == typeof(System.Collections.Generic.List<>)) // List类型序列化
+                {
+                    Converter.ListEnumeration(action, accessor, attributes);
+                }
+                else if (type.GetGenericTypeDefinition() == typeof(System.Collections.Generic.Dictionary<,>)) // 字典类型序列化
+                {
+                    Converter.DictionaryEnumeration(action, accessor, attributes);
+                }
             }
             else
             {
@@ -67,6 +85,7 @@ namespace ObjectConvert
             }
         }
 
+        #region Element Enumeration
         /// <summary>
         /// 类字段值枚举
         /// </summary>
@@ -75,6 +94,12 @@ namespace ObjectConvert
         private static void FieldEnumeration(Converter.ValueActionDelegate action, Converter.Accessor accessor)
         {
             Type type = accessor.type;
+            
+            // TODO: better handle
+            if (accessor.obj == null)
+            {
+                accessor.obj = type.Assembly.CreateInstance(type.FullName);
+            }
 
             Converter.FieldAccessor fieldAccessor = new Converter.FieldAccessor(accessor.obj);
 
@@ -92,10 +117,26 @@ namespace ObjectConvert
             }
         }
 
+        private static void PropertyEnumeration(Converter.ValueActionDelegate action, Converter.Accessor accessor)
+        {
+            Type type = accessor.type;
+
+            Converter.PropertyAccessor propertyAccessor = new Converter.PropertyAccessor(accessor.obj);
+
+            foreach (PropertyInfo property in type.GetProperties(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+            {
+                if (!(Attribute.GetCustomAttribute(property, typeof(NotConvertAttribute)) is NotConvertAttribute))
+                {
+                    propertyAccessor.SetPropertyInfo(property);
+                    Converter.ValueAction(action, propertyAccessor, property.GetCustomAttributes(false));
+                }
+            }
+        }
+
         private static void ArrayEnumeration(Converter.ValueActionDelegate action, Converter.Accessor accessor, object[] attributes)
         {
-            Converter.ArrayAccessor accessor1 = new Converter.ArrayAccessor(accessor.obj as Array);
-            Converter.ArrayEnumeration(action, accessor1, 0, attributes);
+            Converter.ArrayAccessor arrayAccessor = new Converter.ArrayAccessor(accessor.obj as Array);
+            Converter.ArrayEnumeration(action, arrayAccessor, 0, attributes);
         }
 
         private static void ArrayEnumeration(Converter.ValueActionDelegate action, Converter.ArrayAccessor accessor, int rank, object[] attributes)
@@ -123,6 +164,69 @@ namespace ObjectConvert
             }
         }
 
+        private static void ListEnumeration(Converter.ValueActionDelegate action, Converter.Accessor accessor, object[] attributes)
+        {
+            Converter.ListAccessor listAccessor = new Converter.ListAccessor(accessor.obj);
+
+            PropertyInfo countProperty = accessor.obj.GetType().GetProperty("Count");
+
+            for (int index = 0; index < (int)countProperty.GetValue(accessor.obj, null); ++index)
+            {
+                listAccessor.index = index;
+                Converter.ValueAction(action, listAccessor, attributes);
+            }
+        }
+
+        private static void DictionaryEnumeration(Converter.ValueActionDelegate action, Converter.Accessor accessor, object[] attributes)
+        {
+            Converter.DictionaryAccessor dictionaryAccessor = new Converter.DictionaryAccessor(accessor.obj);
+            Converter.ObjectAccessor dictionaryCountAccessor = new Converter.ObjectAccessor(dictionaryAccessor.count);
+
+            Converter.ValueAction(action, dictionaryCountAccessor, attributes);
+            
+            // 序列化
+            if (dictionaryAccessor.dictionary.Count == (int) dictionaryCountAccessor.obj)
+            {
+                foreach (var kvp in dictionaryAccessor.dictionary)
+                {
+                    var key = kvp.GetType().GetProperty("Key");
+                    var value = kvp.GetType().GetProperty("Value");
+
+                    dictionaryAccessor.key = key.GetValue(kvp, null);
+                    dictionaryAccessor.value = value.GetValue(kvp, null);
+                
+                    if (dictionaryAccessor.key == null)
+                        continue;
+                
+                    var keyAccessor = new ObjectAccessor(dictionaryAccessor.key);
+                    var valueAccessor = new ObjectAccessor(dictionaryAccessor.value);
+
+                    Converter.ValueAction(action, keyAccessor, attributes);
+                    Converter.ValueAction(action, valueAccessor, attributes);
+                }
+            }
+            else // 反序列化
+            {
+                for (var i = 0; i < (int) dictionaryCountAccessor.obj; ++i)
+                {
+                    var keyAccessor = new ObjectAccessor(null);
+                    var valueAccessor = new ObjectAccessor(null);
+                    keyAccessor.SetType(dictionaryAccessor.keyType);
+                    valueAccessor.SetType(dictionaryAccessor.valueType);
+                    
+                    Converter.ValueAction(action, keyAccessor, attributes);
+                    Converter.ValueAction(action, valueAccessor, attributes);
+                    
+                    if (keyAccessor.obj == null)
+                        continue;
+                    
+                    dictionaryAccessor.dictionary.Add(keyAccessor.obj, valueAccessor.obj);
+                }
+            }
+        }
+        #endregion
+
+        #region Accessor
         private abstract class Accessor
         {
             public abstract object obj { get; set; }
@@ -140,12 +244,26 @@ namespace ObjectConvert
 
             public override object obj { get { return obj_; } set { /*obj_ = value;*/ } }
 
-            public override Type type
+            public override Type type => this.obj.GetType();
+        }
+        
+        private class ObjectAccessor : Accessor
+        {
+            private object obj_;
+            private Type type_;
+            public ObjectAccessor(object obj)
             {
-                get
-                {
-                    return this.obj.GetType();
-                }
+                this.obj_ = obj;
+                this.type_ = obj?.GetType();
+            }
+
+            public override object obj { get { return obj_; } set { obj_ = value; } }
+
+            public override Type type => this.type_;
+            
+            public void SetType(Type type)
+            {
+                this.type_ = type;
             }
         }
 
@@ -171,17 +289,41 @@ namespace ObjectConvert
                 }
             }
 
-            public override Type type
-            {
-                get
-                {
-                    return this.field_info_.FieldType;
-                }
-            }
+            public override Type type => this.field_info_.FieldType;
 
             public void SetFieldInfo(FieldInfo field_info)
             {
                 this.field_info_ = field_info;
+            }
+        }
+
+        private class PropertyAccessor : Accessor
+        {
+            private object obj_;
+            private PropertyInfo prooperty_info_;
+
+            public PropertyAccessor(object obj)
+            {
+                this.obj_ = obj;
+            }
+
+            public override object obj
+            {
+                get
+                {
+                    return this.prooperty_info_.GetValue(this.obj_);
+                }
+                set
+                {
+                    this.prooperty_info_.SetValue(this.obj_, value);
+                }
+            }
+
+            public override Type type => this.prooperty_info_.PropertyType;
+
+            public void SetPropertyInfo(PropertyInfo property_info)
+            {
+                this.prooperty_info_ = property_info;
             }
         }
 
@@ -215,6 +357,82 @@ namespace ObjectConvert
 
             public int[] index { get; private set; }
         }
+
+        private class ListAccessor : Accessor
+        {
+            private Type type_;
+
+            public ListAccessor(object list)
+            {
+                this.list = list;
+                this.index = 0;
+                this.type_ = list.GetType().GetGenericArguments()[0];
+            }
+
+            public override object obj
+            {
+                get
+                {
+                    return list.GetType().GetMethod("get_Item").Invoke(list, new object[] { this.index });
+                }
+                set
+                {
+                    list.GetType().GetMethod("set_Item").Invoke(list, new object[] { this.index, value });
+                }
+            }   
+
+            public override Type type { get { return type_; } }
+
+            public object list { get; private set; }
+
+            public int index { get; set; }
+        }
+
+        private class DictionaryAccessor : Accessor
+        {
+            private Type keyType_;
+            private Type valueType_;
+
+            public DictionaryAccessor(object dictionary)
+            {
+                this.dictionary = (IDictionary)dictionary;
+                this.key = null;
+                this.keyType_ = dictionary.GetType().GetGenericArguments()[0];
+                this.valueType_ = dictionary.GetType().GetGenericArguments()[1];
+                this.count = this.dictionary.Keys.Count;
+            }
+
+            public override object obj
+            {
+                get
+                {
+                    //return dictionary.GetType().GetMethod("get_Item").Invoke(dictionary, new object[] { this.key });
+                    //return dictionary[key];
+                    //return kvp;
+                    return dictionary;
+                }
+                set
+                {
+                    //dictionary.GetType().GetMethod("set_Item").Invoke(dictionary, new object[] { this.key, value });
+                    //dictionary[key] = value;
+                    //kvp = value;
+                    dictionary = (IDictionary)value;
+                }
+            }
+
+            public override Type type { get { return dictionary.GetType(); } }
+
+            public Type keyType => keyType_;
+            public Type valueType => valueType_;
+
+            public IDictionary dictionary { get; private set; }
+
+            public int count { get; set; }
+
+            public object key { get; set; }
+            public object value { get; set; }
+        }
+        #endregion
 
         private class ToBytesConvert
         {
@@ -253,8 +471,12 @@ namespace ObjectConvert
 #if UNITY_ENGINE
                 else if (type == typeof(Vector2))
                     buffer = Vector2ToBytes((Vector2)obj);
+                else if (type == typeof(Vector2Int))
+                    buffer = Vector2IntToBytes((Vector2Int)obj);
                 else if (type == typeof(Vector3))
                     buffer = Vector3ToBytes((Vector3)obj);
+                else if (type == typeof(Vector3Int))
+                    buffer = Vector3IntToBytes((Vector3Int)obj);
                 else if (type == typeof(Vector4))
                     buffer = Vector4ToBytes((Vector4)obj);
                 else if (type == typeof(Quaternion))
@@ -305,9 +527,16 @@ namespace ObjectConvert
                         }
                     }
                 }
-                else if (type.IsArray)  // 如果是数组,则在数据开头写入数组长度,以便反序列化
+                else if (type.IsArray)  // 如果是数组,则在数组数据开头写入数组长度,以便反序列化
                 {
                     Array array = obj as Array;
+
+                    // 空数组，使用-1作为空数组标识符
+                    if (array == null)
+                    {
+                        this.stream_.Write(BitConverter.GetBytes(-1), 0, sizeof(int));
+                        return false;
+                    }
 
                     // x86使用最大长度为Int32.MaxValue的数组
                     this.stream_.Write(BitConverter.GetBytes(array.Length), 0, sizeof(int));
@@ -315,6 +544,40 @@ namespace ObjectConvert
                     //Debug.Log($"ToBytesConvert.Action() 数据开头写入数组长度:{array.Length}  {ByteArrayToReadableString(BitConverter.GetBytes(array.Length))}");
 
                     return false;
+                }
+                else if (type.IsGenericType) // 泛型类序列化支持, TODO: Test
+                {
+                    if (type.GetGenericTypeDefinition() == typeof(System.Collections.Generic.List<>)) // List类型序列化
+                    {
+                        System.Collections.IList list = obj as System.Collections.IList;
+
+                        // 空List，使用-1作为空List标识符
+                        if (list == null || list.Count == 0)
+                        {
+                            this.stream_.Write(BitConverter.GetBytes(-1), 0, sizeof(int));
+                        }
+                        else
+                        {
+                            this.stream_.Write(BitConverter.GetBytes(list.Count), 0, sizeof(int));
+                        }
+
+                        return false;
+                    }
+                    else if (type.GetGenericTypeDefinition() == typeof(System.Collections.Generic.Dictionary<,>)) // 字典类型序列化
+                    {
+                        System.Collections.IDictionary dictionary = obj as System.Collections.IDictionary;
+
+                        // 空字典，使用-1作为空字典标识符
+                        if (dictionary == null || dictionary.Count == 0)
+                        {
+                            this.stream_.Write(BitConverter.GetBytes(-1), 0, sizeof(int));
+                            return false;
+                        }
+
+                        this.stream_.Write(BitConverter.GetBytes(dictionary.Count), 0, sizeof(int));
+
+                        return false;
+                    }
                 }
 
                 if (buffer == null)
@@ -414,11 +677,21 @@ namespace ObjectConvert
 
                     this.offset += sizeof(float) * 2;
                 }
+                else if (type == typeof(Vector2Int))
+                {
+                    accessor.obj = BytesToVector2Int(this.bytes_, this.offset);
+                    this.offset += sizeof(int) * 2;
+                }
                 else if (type == typeof(Vector3))
                 {
                     accessor.obj = BytesToVector3(this.bytes_, this.offset);
                     this.offset += sizeof(float) * 3;
                 }
+                else if (type == typeof(Vector3Int))
+                {
+                    accessor.obj = BytesToVector3Int(this.bytes_, this.offset);
+                    this.offset += sizeof(int) * 3;
+                }   
                 else if (type == typeof(Vector4))
                 {
                     accessor.obj = BytesToVector4(this.bytes_, this.offset);
@@ -490,8 +763,27 @@ namespace ObjectConvert
                     Array array = null;
                     Type elementType = type.GetElementType();
 
+                    if (this.bytes_ == null || this.bytes_.Length < sizeof(int))
+                    {
+                        throw new Exception($"尝试反序列化数组时失败: 没找到Array的二进制数值{accessor.obj}");
+                    }
+
                     int arrayLength = BitConverter.ToInt32(this.bytes_, this.offset);
                     this.offset += sizeof(int);
+
+                    // 检查空数组标识符
+                    if (arrayLength == -1)
+                    {
+                        accessor.obj = null;
+                        return true;
+                    }
+
+                    // 数组字段序列化时是空的值
+                    if (this.offset >= this.bytes_.Length)
+                    {
+                        accessor.obj = null;
+                        return true;
+                    }
 
                     if (elementType == typeof(bool))
                         array = new bool[arrayLength];
@@ -522,8 +814,12 @@ namespace ObjectConvert
 #if UNITY_ENGINE
                     else if (elementType == typeof(Vector2))
                         array = new Vector2[arrayLength];
+                    else if (elementType == typeof(Vector2Int))
+                        array = new Vector2Int[arrayLength];
                     else if (elementType == typeof(Vector3))
                         array = new Vector3[arrayLength];
+                    else if (elementType == typeof(Vector3Int))
+                        array = new Vector3Int[arrayLength];
                     else if (elementType == typeof(Vector4))
                         array = new Vector4[arrayLength];
                     else if (elementType == typeof(Quaternion))
@@ -559,6 +855,76 @@ namespace ObjectConvert
 
                     return false;
                 }
+                else if (type.IsGenericType) // 泛型类反序列化支持, TODO: Test
+                {
+                    if (type.GetGenericTypeDefinition() == typeof(System.Collections.Generic.List<>)) // List类型反序列化
+                    {
+                        Type elementType = type.GenericTypeArguments[0];
+                        var list = Activator.CreateInstance(type.GetGenericTypeDefinition().MakeGenericType(elementType));
+
+                        if (this.bytes_ == null || this.bytes_.Length < sizeof(int))
+                        {
+                            throw new Exception($"尝试反序列化数组时失败: 没找到List的二进制数值{accessor.obj}");
+                        }
+
+                        int listCount = BitConverter.ToInt32(this.bytes_, this.offset);
+                        this.offset += sizeof(int);
+
+                        // 检查空List标识符
+                        if (listCount == -1)
+                        {
+                            accessor.obj = null;
+                            return true;
+                        }
+
+                        try
+                        {
+                            for (int i = 0; i < listCount; ++i)
+                            {
+                                var elementInstance = elementType.Assembly.CreateInstance(elementType.FullName);
+                                //Debug.Log($"创建数组元素实例:({i} / {arrayLength}) {elementType} {elementInstance}  elementInstance == null ? {elementInstance == null}");
+                                list.GetType().GetMethod("Add").Invoke(list, new[] { elementInstance });
+                            }
+                        }
+                        catch (Exception e)
+                        {
+#if UNITY_ENGINE
+                            Debug.LogError($"Error on ToObjectConvert.Action(*) Create Custom Class List<> Element Instance. {e.Message}");
+#endif
+                            return false;
+                        }
+
+                        accessor.obj = list;
+
+                        return false;
+                    }
+                    else if (type.GetGenericTypeDefinition() == typeof(System.Collections.Generic.Dictionary<,>)) // 字典类型序列化
+                    {
+                        Type keyType = type.GenericTypeArguments[0];
+                        Type valueType = type.GenericTypeArguments[1];
+
+                        var dictionary = Activator.CreateInstance(type.GetGenericTypeDefinition().MakeGenericType(keyType, valueType));
+
+                        if (this.bytes_ == null || this.bytes_.Length < sizeof(int))
+                        {
+                            throw new Exception($"尝试反序列化数组时失败: 没找到Dictionary的二进制数值{accessor.obj}");
+                        }
+
+                        int dictionaryCount = BitConverter.ToInt32(this.bytes_, this.offset);
+                        this.offset += sizeof(int);
+
+                        // 检查空List标识符
+                        if (dictionaryCount == -1)
+                        {
+                            accessor.obj = null;
+                            return true;
+                        }
+
+                        accessor.obj = dictionary;
+
+                        return false;
+                    }
+                }
                 else if (type.IsClass)
                     return false;
 
@@ -568,9 +934,12 @@ namespace ObjectConvert
             }
         }
 
-        private delegate bool ValueActionDelegate(Converter.Accessor accessor, object[] attributes);
 
-        private static string ByteArrayToReadableString(byte[] arrInput)
+        /// <summary>
+        /// 将byte数组转为人类可读的16进制字符串
+        /// </summary>
+        /// <param name="arrInput"></param>
+        public static string ByteArrayToReadableString(byte[] arrInput)
         {
             int i;
             var sOutput = new System.Text.StringBuilder(arrInput.Length);
@@ -581,6 +950,41 @@ namespace ObjectConvert
             return sOutput.ToString();
         }
 
+
+        /// <summary>
+        /// 将byte数组转为人类可读的16进制字符串(Fast)
+        /// </summary>
+        /// <param name="barray"></param>
+        /// <returns></returns>
+        public static string ByteArrayToHex(byte[] barray)
+        {
+            char[] c = new char[barray.Length * 2];
+            byte b;
+            for (int i = 0; i < barray.Length; ++i)
+            {
+                b = ((byte)(barray[i] >> 4));
+                c[i * 2] = (char)(b > 9 ? b + 0x37 : b + 0x30);
+                b = ((byte)(barray[i] & 0xF));
+                c[i * 2 + 1] = (char)(b > 9 ? b + 0x37 : b + 0x30);
+            }
+            return new string(c);
+        }
+
+
+        /// <summary>
+        /// 将人类可读的16进制字符串转为byte数组
+        /// </summary>
+        /// <param name="hex"></param>
+        public static byte[] ReadableStringToByteArray(String hex)
+        {
+            int NumberChars = hex.Length;
+            byte[] bytes = new byte[NumberChars / 2];
+            for (int i = 0; i < NumberChars; i += 2)
+                bytes[i / 2] = Convert.ToByte(hex.Substring(i, 2), 16);
+            return bytes;
+        }
+
+
         #region Extension
 #if UNITY_ENGINE
         public static byte[] Vector2ToBytes(UnityEngine.Vector2 vect)
@@ -590,12 +994,27 @@ namespace ObjectConvert
             Buffer.BlockCopy(BitConverter.GetBytes(vect.y), 0, buff, 1 * sizeof(float), sizeof(float));
             return buff;
         }
+        public static byte[] Vector2IntToBytes(UnityEngine.Vector2Int vect)
+        {
+            byte[] buff = new byte[sizeof(int) * 2];
+            Buffer.BlockCopy(BitConverter.GetBytes(vect.x), 0, buff, 0 * sizeof(int), sizeof(int));
+            Buffer.BlockCopy(BitConverter.GetBytes(vect.y), 0, buff, 1 * sizeof(int), sizeof(int));
+            return buff;
+        }
         public static byte[] Vector3ToBytes(UnityEngine.Vector3 vect)
         {
             byte[] buff = new byte[sizeof(float) * 3];
             Buffer.BlockCopy(BitConverter.GetBytes(vect.x), 0, buff, 0 * sizeof(float), sizeof(float));
             Buffer.BlockCopy(BitConverter.GetBytes(vect.y), 0, buff, 1 * sizeof(float), sizeof(float));
             Buffer.BlockCopy(BitConverter.GetBytes(vect.z), 0, buff, 3 * sizeof(float), sizeof(float));
+            return buff;
+        }
+        public static byte[] Vector3IntToBytes(UnityEngine.Vector3Int vect)
+        {
+            byte[] buff = new byte[sizeof(int) * 3];
+            Buffer.BlockCopy(BitConverter.GetBytes(vect.x), 0, buff, 0 * sizeof(int), sizeof(int));
+            Buffer.BlockCopy(BitConverter.GetBytes(vect.y), 0, buff, 1 * sizeof(int), sizeof(int));
+            Buffer.BlockCopy(BitConverter.GetBytes(vect.z), 0, buff, 3 * sizeof(int), sizeof(int));
             return buff;
         }
         public static byte[] Vector4ToBytes(UnityEngine.Vector4 vect)
@@ -638,6 +1057,15 @@ namespace ObjectConvert
             vect.y = BitConverter.ToSingle(buff, startIndex + 1 * sizeof(float));
             return vect;
         }
+        public static UnityEngine.Vector2Int BytesToVector2Int(byte[] buff, int startIndex)
+        {
+            if (buff == null)
+                return default(UnityEngine.Vector2Int);
+            UnityEngine.Vector2Int vect = UnityEngine.Vector2Int.zero;
+            vect.x = BitConverter.ToInt32(buff, startIndex + 0 * sizeof(int));
+            vect.y = BitConverter.ToInt32(buff, startIndex + 1 * sizeof(int));
+            return vect;
+        }
         public static UnityEngine.Vector3 BytesToVector3(byte[] buff)
         {
             return BytesToVector3(buff, 0);
@@ -650,6 +1078,16 @@ namespace ObjectConvert
             vect.x = BitConverter.ToSingle(buff, startIndex + 0 * sizeof(float));
             vect.y = BitConverter.ToSingle(buff, startIndex + 1 * sizeof(float));
             vect.z = BitConverter.ToSingle(buff, startIndex + 2 * sizeof(float));
+            return vect;
+        }
+        public static UnityEngine.Vector3Int BytesToVector3Int(byte[] buff, int startIndex)
+        {
+            if (buff == null)
+                return default(UnityEngine.Vector3Int);
+            UnityEngine.Vector3Int vect = UnityEngine.Vector3Int.zero;
+            vect.x = BitConverter.ToInt32(buff, startIndex + 0 * sizeof(int));
+            vect.y = BitConverter.ToInt32(buff, startIndex + 1 * sizeof(int));
+            vect.z = BitConverter.ToInt32(buff, startIndex + 2 * sizeof(int));
             return vect;
         }
         public static UnityEngine.Vector4 BytesToVector4(byte[] buff)
