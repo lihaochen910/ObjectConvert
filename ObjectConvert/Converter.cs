@@ -166,6 +166,9 @@ namespace ObjectConvert
 
         private static void ListEnumeration(Converter.ValueActionDelegate action, Converter.Accessor accessor, object[] attributes)
         {
+            if (accessor.obj == null)
+                return;
+
             Converter.ListAccessor listAccessor = new Converter.ListAccessor(accessor.obj);
 
             PropertyInfo countProperty = accessor.obj.GetType().GetProperty("Count");
@@ -179,6 +182,9 @@ namespace ObjectConvert
 
         private static void DictionaryEnumeration(Converter.ValueActionDelegate action, Converter.Accessor accessor, object[] attributes)
         {
+            if (accessor.obj == null)
+                return;
+
             Converter.DictionaryAccessor dictionaryAccessor = new Converter.DictionaryAccessor(accessor.obj);
             Converter.ObjectAccessor dictionaryCountAccessor = new Converter.ObjectAccessor(dictionaryAccessor.count);
 
@@ -200,6 +206,8 @@ namespace ObjectConvert
                 
                     var keyAccessor = new ObjectAccessor(dictionaryAccessor.key);
                     var valueAccessor = new ObjectAccessor(dictionaryAccessor.value);
+                    keyAccessor.SetType(dictionaryAccessor.keyType);
+                    valueAccessor.SetType(dictionaryAccessor.valueType);
 
                     Converter.ValueAction(action, keyAccessor, attributes);
                     Converter.ValueAction(action, valueAccessor, attributes);
@@ -400,6 +408,7 @@ namespace ObjectConvert
                 this.keyType_ = dictionary.GetType().GetGenericArguments()[0];
                 this.valueType_ = dictionary.GetType().GetGenericArguments()[1];
                 this.count = this.dictionary.Keys.Count;
+                //this.count = this.dictionary != null ? this.dictionary.Keys.Count : 0;
             }
 
             public override object obj
