@@ -43,8 +43,14 @@ namespace ObjectConvert
 
         public static void ToObject<T>(ref T obj, byte[] bytes) where T : new()
         {
-            if (obj == null || bytes == null)
+            if (bytes == null)
                 return;
+
+            if (obj == null)
+            {
+                obj = (T)typeof(T).Assembly.CreateInstance(typeof(T).FullName);
+            }
+
             Converter.ToObjectConvert toObjectConvert = new Converter.ToObjectConvert(bytes);
             Converter.ValueAction(toObjectConvert.Action, new Converter.ObjectDummyAccessor(obj), null);
         }
@@ -57,7 +63,7 @@ namespace ObjectConvert
             // 普通字段
             if (action(accessor, attributes))
                 return;
-
+            
             // 数组字段、自定义类字段
             Type type = accessor.type;
             if (type.IsArray)
@@ -68,6 +74,8 @@ namespace ObjectConvert
             }
             else if (type.IsGenericType) // 泛型类序列化支持
             {
+                if (accessor.obj == null)
+                    return;
                 if (type.GetGenericTypeDefinition() == typeof(System.Collections.Generic.List<>)) // List类型序列化
                 {
                     Converter.ListEnumeration(action, accessor, attributes);
@@ -94,25 +102,21 @@ namespace ObjectConvert
         private static void FieldEnumeration(Converter.ValueActionDelegate action, Converter.Accessor accessor)
         {
             Type type = accessor.type;
-            
-            // TODO: better handle
-            if (accessor.obj == null)
-            {
-                accessor.obj = type.Assembly.CreateInstance(type.FullName);
-            }
 
             Converter.FieldAccessor fieldAccessor = new Converter.FieldAccessor(accessor.obj);
 
-            //Debug.Log($"FieldEnumeration 开始枚举{type.Name}的字段 -->");
+            //Debug.Log($"FieldEnumeration 开始枚举{type.Name}类的字段 -->");
 
             foreach (FieldInfo field in type.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
             {
                 if (!(Attribute.GetCustomAttribute(field, typeof(NotConvertAttribute)) is NotConvertAttribute))
                 {
                     fieldAccessor.SetFieldInfo(field);
-                    //if (accessor.obj != null)
-                    //    Debug.Log($"{type.Name}.{field.Name} = {field.GetValue(accessor.obj)}");
+
+                    //Debug.Log($"   ->   <color=aqua>{type.Name}::{field.Name}</color>");
                     Converter.ValueAction(action, fieldAccessor, field.GetCustomAttributes(false));
+                    //Debug.Log($"      <color=lime>{type.Name}::{field.Name} ({field.FieldType}) = {field.GetValue(accessor.obj)}   <-</color>");
+                    //Debug.Log(string.Empty);
                 }
             }
         }
@@ -166,9 +170,6 @@ namespace ObjectConvert
 
         private static void ListEnumeration(Converter.ValueActionDelegate action, Converter.Accessor accessor, object[] attributes)
         {
-            if (accessor.obj == null)
-                return;
-
             Converter.ListAccessor listAccessor = new Converter.ListAccessor(accessor.obj);
 
             PropertyInfo countProperty = accessor.obj.GetType().GetProperty("Count");
@@ -182,17 +183,18 @@ namespace ObjectConvert
 
         private static void DictionaryEnumeration(Converter.ValueActionDelegate action, Converter.Accessor accessor, object[] attributes)
         {
-            if (accessor.obj == null)
+            Converter.DictionaryAccessor dictionaryAccessor = new Converter.DictionaryAccessor(accessor.obj);
+            //Converter.ObjectAccessor dictionaryCountAccessor = new Converter.ObjectAccessor(dictionaryAccessor.count);
+
+            if (action(dictionaryAccessor, attributes))
                 return;
 
-            Converter.DictionaryAccessor dictionaryAccessor = new Converter.DictionaryAccessor(accessor.obj);
-            Converter.ObjectAccessor dictionaryCountAccessor = new Converter.ObjectAccessor(dictionaryAccessor.count);
-
-            Converter.ValueAction(action, dictionaryCountAccessor, attributes);
-            
             // 序列化
-            if (dictionaryAccessor.dictionary.Count == (int) dictionaryCountAccessor.obj)
+            //if (dictionaryAccessor.dictionary.Count == (int) dictionaryCountAccessor.obj)
+            if (!dictionaryAccessor.isDeserialization)
             {
+                //Debug.Log($"<color=yellow>字典成员枚举：序列化模式</color>");
+
                 foreach (var kvp in dictionaryAccessor.dictionary)
                 {
                     var key = kvp.GetType().GetProperty("Key");
@@ -203,7 +205,9 @@ namespace ObjectConvert
                 
                     if (dictionaryAccessor.key == null)
                         continue;
-                
+
+                    //Console.WriteLine($"序列化kv:{dictionaryAccessor.key} {dictionaryAccessor.value}");
+
                     var keyAccessor = new ObjectAccessor(dictionaryAccessor.key);
                     var valueAccessor = new ObjectAccessor(dictionaryAccessor.value);
                     keyAccessor.SetType(dictionaryAccessor.keyType);
@@ -215,16 +219,22 @@ namespace ObjectConvert
             }
             else // 反序列化
             {
-                for (var i = 0; i < (int) dictionaryCountAccessor.obj; ++i)
+                //Debug.Log($"<color=yellow>字典成员枚举：反序列化模式</color>");
+                //for (var i = 0; i < (int) dictionaryCountAccessor.obj; ++i)
+                for (var i = 0; i < dictionaryAccessor.count; ++i)
                 {
                     var keyAccessor = new ObjectAccessor(null);
                     var valueAccessor = new ObjectAccessor(null);
                     keyAccessor.SetType(dictionaryAccessor.keyType);
                     valueAccessor.SetType(dictionaryAccessor.valueType);
-                    
+
+                    //Console.WriteLine($"准备反序列化kv类型:{keyAccessor.type} {valueAccessor.type}");
+
                     Converter.ValueAction(action, keyAccessor, attributes);
+                    //Console.WriteLine($"反序列化key:{keyAccessor.obj}");
                     Converter.ValueAction(action, valueAccessor, attributes);
-                    
+                    //Console.WriteLine($"反序列化value:{valueAccessor.obj}");
+
                     if (keyAccessor.obj == null)
                         continue;
                     
@@ -440,6 +450,8 @@ namespace ObjectConvert
 
             public object key { get; set; }
             public object value { get; set; }
+
+            public bool isDeserialization { get; set; }
         }
         #endregion
 
@@ -451,6 +463,7 @@ namespace ObjectConvert
 
             public bool Action(Converter.Accessor accessor, object[] attributes)
             {
+                //Debug.Log($"<color=yellow>0x{this.stream_.Position}</color> write: {accessor.obj} {accessor.type}");
                 object obj = accessor.obj;
                 byte[] buffer = null;
                 Type type = accessor.type;
@@ -540,15 +553,20 @@ namespace ObjectConvert
                 {
                     Array array = obj as Array;
 
-                    // 空数组，使用-1作为空数组标识符
+                    // 写入Null/NotNull标志
+                    bool classIsNull = obj == null;
+
+                    this.stream_.Write(BitConverter.GetBytes(!classIsNull), 0, sizeof(bool));
+
+                    // 写入数组长度
                     if (array == null)
                     {
-                        this.stream_.Write(BitConverter.GetBytes(-1), 0, sizeof(int));
-                        return false;
+                        this.stream_.Write(BitConverter.GetBytes(0), 0, sizeof(int));
                     }
-
-                    // x86使用最大长度为Int32.MaxValue的数组
-                    this.stream_.Write(BitConverter.GetBytes(array.Length), 0, sizeof(int));
+                    else
+                    {
+                        this.stream_.Write(BitConverter.GetBytes(array.Length), 0, sizeof(int));
+                    }
 
                     //Debug.Log($"ToBytesConvert.Action() 数据开头写入数组长度:{array.Length}  {ByteArrayToReadableString(BitConverter.GetBytes(array.Length))}");
 
@@ -560,10 +578,15 @@ namespace ObjectConvert
                     {
                         System.Collections.IList list = obj as System.Collections.IList;
 
-                        // 空List，使用-1作为空List标识符
-                        if (list == null || list.Count == 0)
+                        // 写入Null/NotNull标志
+                        bool classIsNull = obj == null;
+
+                        this.stream_.Write(BitConverter.GetBytes(!classIsNull), 0, sizeof(bool));
+
+                        // 写入List长度
+                        if (list == null)
                         {
-                            this.stream_.Write(BitConverter.GetBytes(-1), 0, sizeof(int));
+                            this.stream_.Write(BitConverter.GetBytes(0), 0, sizeof(int));
                         }
                         else
                         {
@@ -574,19 +597,40 @@ namespace ObjectConvert
                     }
                     else if (type.GetGenericTypeDefinition() == typeof(System.Collections.Generic.Dictionary<,>)) // 字典类型序列化
                     {
-                        System.Collections.IDictionary dictionary = obj as System.Collections.IDictionary;
+                        //Debug.Log("<color=yellow>ToBytesConvert::IDictionary</color>");
 
-                        // 空字典，使用-1作为空字典标识符
-                        if (dictionary == null || dictionary.Count == 0)
+                        if (accessor is FieldAccessor)
                         {
-                            this.stream_.Write(BitConverter.GetBytes(-1), 0, sizeof(int));
-                            return false;
-                        }
+                            // 写入Null/NotNull标志
+                            bool classIsNull = obj == null;
 
-                        this.stream_.Write(BitConverter.GetBytes(dictionary.Count), 0, sizeof(int));
+                            this.stream_.Write(BitConverter.GetBytes(!classIsNull), 0, sizeof(bool));
+                        }
+                        else if (accessor is DictionaryAccessor)
+                        {
+                            System.Collections.IDictionary dictionary = obj as System.Collections.IDictionary;
+
+                            // 字典比较特殊，在此处写入长度的话，在外面无法取到
+                            // 写入字典长度
+                            if (dictionary == null)
+                            {
+                                this.stream_.Write(BitConverter.GetBytes(0), 0, sizeof(int));
+                            }
+                            else
+                            {
+                                this.stream_.Write(BitConverter.GetBytes(dictionary.Count), 0, sizeof(int));
+                            }
+                        }
 
                         return false;
                     }
+                }
+                else if (type.IsClass)
+                {
+                    bool classIsNull = obj == null;
+                    // 使用bool作为自定义类状态标识符(空/非空)
+                    this.stream_.Write(BitConverter.GetBytes(!classIsNull), 0, sizeof(bool));
+                    return classIsNull;
                 }
 
                 if (buffer == null)
@@ -617,6 +661,7 @@ namespace ObjectConvert
 
             public bool Action(Converter.Accessor accessor, object[] attributes)
             {
+                //Debug.Log($"<color=yellow>0x{this.offset}</color> start read");
                 Type type = accessor.type;
                 if (type == typeof(bool))
                 {
@@ -752,11 +797,11 @@ namespace ObjectConvert
                     }
                     else
                     {
-                        int int32 = BitConverter.ToInt32(this.bytes_, this.offset);
+                        int stringLenth = BitConverter.ToInt32(this.bytes_, this.offset);
                         this.offset += 4;
-                        char[] chArray = new char[int32];
+                        char[] chArray = new char[stringLenth];
                         int index = 0;
-                        while (index < int32)
+                        while (index < stringLenth)
                         {
                             chArray[index] = BitConverter.ToChar(this.bytes_, this.offset);
                             ++index;
@@ -777,11 +822,14 @@ namespace ObjectConvert
                         throw new Exception($"尝试反序列化数组时失败: 没找到Array的二进制数值{accessor.obj}");
                     }
 
+                    bool arrayIsNull = !BitConverter.ToBoolean(this.bytes_, this.offset);
+                    this.offset++;
+
                     int arrayLength = BitConverter.ToInt32(this.bytes_, this.offset);
                     this.offset += sizeof(int);
 
-                    // 检查空数组标识符
-                    if (arrayLength == -1)
+                    // 检查Null/NotNull标志
+                    if (arrayIsNull)
                     {
                         accessor.obj = null;
                         return true;
@@ -868,29 +916,36 @@ namespace ObjectConvert
                 {
                     if (type.GetGenericTypeDefinition() == typeof(System.Collections.Generic.List<>)) // List类型反序列化
                     {
-                        Type elementType = type.GenericTypeArguments[0];
-                        var list = Activator.CreateInstance(type.GetGenericTypeDefinition().MakeGenericType(elementType));
-
-                        if (this.bytes_ == null || this.bytes_.Length < sizeof(int))
+                        if (this.bytes_ == null || this.bytes_.Length < sizeof(byte) + sizeof(int))
                         {
                             throw new Exception($"尝试反序列化数组时失败: 没找到List的二进制数值{accessor.obj}");
                         }
+
+                        bool listIsNull = !BitConverter.ToBoolean(this.bytes_, this.offset);
+                        this.offset++;
 
                         int listCount = BitConverter.ToInt32(this.bytes_, this.offset);
                         this.offset += sizeof(int);
 
                         // 检查空List标识符
-                        if (listCount == -1)
+                        if (listIsNull)
                         {
                             accessor.obj = null;
                             return true;
                         }
 
+                        Type elementType = type.GenericTypeArguments[0];
+                        var list = Activator.CreateInstance(type.GetGenericTypeDefinition().MakeGenericType(elementType));
+
                         try
                         {
                             for (int i = 0; i < listCount; ++i)
                             {
-                                var elementInstance = elementType.Assembly.CreateInstance(elementType.FullName);
+                                object elementInstance = null;
+
+                                if (elementType == typeof(string) || elementType == typeof(System.String))
+                                    elementInstance = string.Empty;
+                                else elementType.Assembly.CreateInstance(elementType.FullName);
                                 //Debug.Log($"创建数组元素实例:({i} / {arrayLength}) {elementType} {elementInstance}  elementInstance == null ? {elementInstance == null}");
                                 list.GetType().GetMethod("Add").Invoke(list, new[] { elementInstance });
                             }
@@ -909,35 +964,58 @@ namespace ObjectConvert
                     }
                     else if (type.GetGenericTypeDefinition() == typeof(System.Collections.Generic.Dictionary<,>)) // 字典类型序列化
                     {
-                        Type keyType = type.GenericTypeArguments[0];
-                        Type valueType = type.GenericTypeArguments[1];
+                        //Debug.Log($"<color=yellow>ToObjectConvert::IDictionary</color> {accessor.GetType()}");
 
-                        var dictionary = Activator.CreateInstance(type.GetGenericTypeDefinition().MakeGenericType(keyType, valueType));
-
-                        if (this.bytes_ == null || this.bytes_.Length < sizeof(int))
+                        if (accessor is FieldAccessor)
                         {
-                            throw new Exception($"尝试反序列化数组时失败: 没找到Dictionary的二进制数值{accessor.obj}");
+                            bool dictionaryIsNull = !BitConverter.ToBoolean(this.bytes_, this.offset);
+                            this.offset++;
+
+                            // 检查Null标识符
+                            if (dictionaryIsNull)
+                            {
+                                accessor.obj = null;
+                            }
+                            else
+                            {
+                                Type keyType = type.GenericTypeArguments[0];
+                                Type valueType = type.GenericTypeArguments[1];
+
+                                accessor.obj = Activator.CreateInstance(type.GetGenericTypeDefinition().MakeGenericType(keyType, valueType));
+                            }
+
+                            return dictionaryIsNull;
                         }
-
-                        int dictionaryCount = BitConverter.ToInt32(this.bytes_, this.offset);
-                        this.offset += sizeof(int);
-
-                        // 检查空List标识符
-                        if (dictionaryCount == -1)
+                        else if (accessor is DictionaryAccessor)
                         {
-                            accessor.obj = null;
-                            return true;
-                        }
+                            int dictionaryCount = BitConverter.ToInt32(this.bytes_, this.offset);
+                            this.offset += sizeof(int);
 
-                        accessor.obj = dictionary;
+                            DictionaryAccessor dictionaryAccessor = accessor as DictionaryAccessor;
+                            dictionaryAccessor.isDeserialization = true;
+                            dictionaryAccessor.count = dictionaryCount;
+                        }
 
                         return false;
                     }
                 }
                 else if (type.IsClass)
-                    return false;
+                {
+                    bool classIsNull = !BitConverter.ToBoolean(this.bytes_, this.offset);
+                    this.offset++;
 
-                //Debug.Log($"read {accessor.type}: {accessor.obj} (0x{this.offset})");
+                    // 检查空Class标识符
+                    if (classIsNull)
+                    {
+                        accessor.obj = null;
+                        return true;
+                    }
+                    
+                    accessor.obj = accessor.type.Assembly.CreateInstance(accessor.type.FullName);
+                    return false;
+                }
+
+                //Debug.Log($"end read {accessor.type}: {accessor.obj} (0x{this.offset})");
 
                 return true;
             }
