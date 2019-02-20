@@ -193,7 +193,7 @@ namespace ObjectConvert
             //if (dictionaryAccessor.dictionary.Count == (int) dictionaryCountAccessor.obj)
             if (!dictionaryAccessor.isDeserialization)
             {
-                //Debug.Log($"<color=yellow>字典成员枚举：序列化模式</color>");
+                //Debug.Log($"<color=yellow>字典成员枚举：序列化模式</color> {dictionaryAccessor.obj}");
 
                 foreach (var kvp in dictionaryAccessor.dictionary)
                 {
@@ -206,7 +206,7 @@ namespace ObjectConvert
                     if (dictionaryAccessor.key == null)
                         continue;
 
-                    //Console.WriteLine($"序列化kv:{dictionaryAccessor.key} {dictionaryAccessor.value}");
+                    //Debug.Log($"序列化kv:{dictionaryAccessor.key} {dictionaryAccessor.value}");
 
                     var keyAccessor = new ObjectAccessor(dictionaryAccessor.key);
                     var valueAccessor = new ObjectAccessor(dictionaryAccessor.value);
@@ -219,7 +219,7 @@ namespace ObjectConvert
             }
             else // 反序列化
             {
-                //Debug.Log($"<color=yellow>字典成员枚举：反序列化模式</color>");
+                //Debug.Log($"<color=yellow>字典成员枚举：反序列化模式</color> {dictionaryAccessor.obj}");
                 //for (var i = 0; i < (int) dictionaryCountAccessor.obj; ++i)
                 for (var i = 0; i < dictionaryAccessor.count; ++i)
                 {
@@ -231,9 +231,11 @@ namespace ObjectConvert
                     //Console.WriteLine($"准备反序列化kv类型:{keyAccessor.type} {valueAccessor.type}");
 
                     Converter.ValueAction(action, keyAccessor, attributes);
-                    //Console.WriteLine($"反序列化key:{keyAccessor.obj}");
+                    //Debug.Log($"反序列化key:{keyAccessor.obj}");
                     Converter.ValueAction(action, valueAccessor, attributes);
-                    //Console.WriteLine($"反序列化value:{valueAccessor.obj}");
+                    //Debug.Log($"反序列化value:{valueAccessor.obj}");
+
+                    //Debug.Log($"反序列化kv:{keyAccessor.obj} {valueAccessor.obj}");
 
                     if (keyAccessor.obj == null)
                         continue;
@@ -468,6 +470,10 @@ namespace ObjectConvert
                 byte[] buffer = null;
                 Type type = accessor.type;
 
+                // 枚举类型比较特殊，需要返回枚举的基础值类型才可以正常序列化/反序列化
+                if (accessor.type.IsEnum)
+                    type = accessor.type.GetEnumUnderlyingType();
+
                 if (type == typeof(bool))
                     buffer = BitConverter.GetBytes((bool)obj);
                 else if (type == typeof(char))
@@ -663,6 +669,11 @@ namespace ObjectConvert
             {
                 //Debug.Log($"<color=yellow>0x{this.offset}</color> start read");
                 Type type = accessor.type;
+
+                // 枚举类型比较特殊，需要返回枚举的基础值类型才可以正常序列化/反序列化
+                if (accessor.type.IsEnum)
+                    type = accessor.type.GetEnumUnderlyingType();
+
                 if (type == typeof(bool))
                 {
                     accessor.obj = BitConverter.ToBoolean(this.bytes_, this.offset);
